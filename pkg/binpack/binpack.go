@@ -17,8 +17,10 @@ type BinPack struct {
 
 var _ = framework.ScorePlugin(&BinPack{})
 
-// Name is the name of the plugin used in the Registry and configurations.
-const Name = "Binpack"
+const (
+	GPUResourceName = "cmos.chinamobile.com/vgpu"
+	Name            = "Binpack"
+)
 
 func (bp *BinPack) Name() string {
 	return Name
@@ -27,7 +29,7 @@ func (bp *BinPack) Name() string {
 // NormalizeScore 将分数规整到框架支持的分数区间
 func (bp *BinPack) NormalizeScore(ctx context.Context, state *framework.CycleState, p *v1.Pod, scores framework.NodeScoreList) *framework.Status {
 	// Find highest and lowest scores.
-	var highest int64 = -math.MaxInt64
+	var highest int64 = math.MinInt64
 	var lowest int64 = math.MaxInt64
 	for _, nodeScore := range scores {
 		if nodeScore.Score > highest {
@@ -52,8 +54,20 @@ func (bp *BinPack) NormalizeScore(ctx context.Context, state *framework.CycleSta
 	return nil
 }
 
+func useGPUResource(pod *v1.Pod) bool {
+	for _, c := range append(pod.Spec.Containers, pod.Spec.InitContainers...) {
+		if _, ok := c.Resources.Limits[GPUResourceName]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // Score invoked at the score extension point.
 func (bp *BinPack) Score(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeName string) (int64, *framework.Status) {
+	if !useGPUResource(pod) {
+		return 0, nil
+	}
 	nodeInfo, err := bp.handle.SnapshotSharedLister().NodeInfos().Get(nodeName)
 	if err != nil {
 		return 0, framework.NewStatus(framework.Error, fmt.Sprintf("getting node %q from Snapshot: %v", nodeName, err))
@@ -62,8 +76,11 @@ func (bp *BinPack) Score(ctx context.Context, state *framework.CycleState, pod *
 }
 
 func (bp *BinPack) score(nodeInfo *framework.NodeInfo) (int64, *framework.Status) {
+	if _, ok := nodeInfo.Allocatable.ScalarResources[GPUResourceName]; !ok {
+		return 0, framework.NewStatus(framework.UnschedulableAndUnresolvable)
+	}
 	// 剩余可分配量 = 总可分配量 - 已分配量
-	rest := nodeInfo.Allocatable.MilliCPU - nodeInfo.Requested.MilliCPU
+	rest := nodeInfo.Allocatable.ScalarResources[GPUResourceName] - nodeInfo.Requested.ScalarResources[GPUResourceName]
 	score := -rest
 	// 根据rest计算分数，剩余越多分数越低
 	klog.Infof("node %s get score %d", nodeInfo.Node().Name, score)
